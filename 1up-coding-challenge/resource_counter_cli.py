@@ -5,13 +5,20 @@ from tabulate import tabulate
 import sys
 
 class RescourceDataObj(object):
+    """
+    Object to organize data structure manipulation and storage
+    """
     def __init__(self, filename, directory='data'):
         self.filename = filename
         self.directory = directory
 
+        # counter id will store how many unique times this object
+        # is associated with a patient
         self.counter_ids = list()
         self._extension = '.ndjson'
+        self._resource_type_divider = '/'
 
+        # initialize by loading ndjson file
         self.resource_name = self.extract_resource_name()
         self.df = self.load_data()
 
@@ -24,13 +31,20 @@ class RescourceDataObj(object):
 
     @property
     def reference_map(self):
+        # this function takes a while so definitely saving this map
+        # once it is made
         if self._reference_map is None:
             self._reference_map = self.make_reference_map()
         return self._reference_map
 
     def make_reference_map(self):
+        # create a dict mapping the highlevel dataframe column with
+        # any other resource type
         ref_map = {}
         for col in self.df:
+            # I am not sure this is the most efficient way to do this
+            # and this definitely takes a lot of time but it also
+            # greatly simplifies my algorithm if I have this ready
             col_df = self.df[col].map(self.search_is_reference).explode()
             if any(col_df.values):
                 unique_vals = col_df.unique()
@@ -38,13 +52,14 @@ class RescourceDataObj(object):
         return ref_map
 
     def resource_dict(self, resource):
+        # this dict contains a sub dataframes of the ids of other resource
+        # types that are contained in this dataframe
         if resource not in self._resource_dict_map.keys():
             self._resource_dict_map[resource] = self.build_resource_dict(resource)
         return self._resource_dict_map[resource]
 
     def build_resource_dict(self, resource):
         # figure out column name that goes in the dataframe
-        #
         colname = [c for c, rsrcs in self.reference_map.items() if resource in rsrcs]
         if len(colname) == 0:
             return None
@@ -53,6 +68,8 @@ class RescourceDataObj(object):
         # has the same id.  This seems to be correct...
         colname = colname[0]
 
+        # this function simply extracts the ids of the resource and indexes it
+        # with the ids of the top level resource
         dfr = pd.concat([self.df['id'], self.df[colname].map(functools.partial(
             self.explode_search, criteria_func=functools.partial(
                 self.search_resource_criteria, resource_name=resource))).explode()], axis=1).rename(
@@ -69,6 +86,8 @@ class RescourceDataObj(object):
     def extract_resource_name(self):
         return self.filename.replace(self._extension, '')
 
+    # this seems to be the fastest way to get to the resource ids or whatever else I
+    # need
     def explode_search(self, cell, criteria_func=None, cell_list=None):
         if cell_list is None:
             cell_list = []
@@ -85,15 +104,21 @@ class RescourceDataObj(object):
             criteria_func(cell, cell_list)
         return cell_list
 
-    def seach_list_criteria(self, cell, cell_list, list_criteria=None):
+    def search_list_criteria(self, cell, cell_list, list_criteria=None):
+        # this function is used for extracting patient information
         if cell in list_criteria:
             cell_list.append(cell)
 
     def search_resource_criteria(self, cell, cell_list, resource_name=None):
-        if isinstance(cell, str) and resource_name + '/' in cell:
-            cell_list.append(cell.replace(resource_name + '/', ''))
+        # this is used for creating the resource dict with sub dataframes
+        # and will extract the id
+        if isinstance(cell, str) and resource_name + self._resource_type_divider in cell:
+            cell_list.append(cell.replace(resource_name + self._resource_type_divider, ''))
 
     def search_is_reference(self, cell, refs=None):
+        # using this to create the refrence map
+        # should be able combine with the explode_search function
+        # but couldn't think of a way in time
         if refs is None:
             refs = [False]
         if isinstance(cell, list):
@@ -108,6 +133,8 @@ class RescourceDataObj(object):
         return refs
 
 class PatientResourceDataObj(RescourceDataObj):
+    # I want to have a specialized patient object that is probably unnecessary
+    # but since I'm only using these functions with Patient made sense to split
     def __init__(self, *args, **kwargs):
         super(PatientResourceDataObj, self).__init__(*args, **kwargs)
 
@@ -116,14 +143,13 @@ class PatientResourceDataObj(RescourceDataObj):
     def set_patient_id(self, firstname, lastname, id):
         if id is None:
             id = self.find_patient_id(firstname, lastname)
-
         self.input_id = id
 
     def find_patient_id(self, firstname, lastname):
         id = None
         for id, cell in zip(self.df.id, self.df[self._name_col]):
             name = ''.join(self.explode_search(cell, criteria_func=functools.partial(
-                self.seach_list_criteria, list_criteria=[firstname, lastname])))
+                self.search_list_criteria, list_criteria=[firstname, lastname])))
             if name != '':
                 break
         return id
@@ -156,26 +182,41 @@ def resource_counter_cli(firstname, lastname, id, verbose=True):
     for resource in resource_types:
         rdo = data[resource]
 
+        # not going to bother looking for the key cause I already did
+        # and I know there's only one
         if resource == patient_key:
             rdo.counter_ids.append([rdo.input_id])
 
         has_patients = False
+        # get all the patient info for this resource type if there is any
         df_pats = rdo.resource_dict(patient_key)
         if df_pats is not None:
+            # get the ids for this resource type if it matches the patient id
+            # and if this id hasn't already been accounted for
             df_pat = df_pats[(df_pats[patient_key] == id) & (~df_pats.id.isin(rdo.counter_ids))]
             rdo.counter_ids.extend(list(df_pat.id.unique()))
             has_patients = True
 
+        # now look at every resource that is referenced in this resource type
         for ref_key, ref_resources in rdo.reference_map.items():
             for ref_rs in ref_resources:
+                # again I already know what will happen if this is a patient
                 if patient_key == ref_rs:
                     continue
                 if has_patients:
                     df_ref = rdo.resource_dict(ref_rs)
+                    # get the ids for the reference resource type if they are linked to a patient
+                    # and if these ids haven't been accounted for
+                    # and if they are not null... happens sometimes when there are multiple
+                    # instances of resource type for a single entry of this resource type
                     ref_ids = df_ref[(df_ref.id.isin(df_pat.id)) & (
                         ~df_ref[ref_rs].isin(data[ref_rs].counter_ids)) & (
                         ~df_ref[ref_rs].isnull())][ref_rs].unique()
                     data[ref_rs].counter_ids.extend(list(ref_ids))
+
+        # I thought this might have to be recursive but
+        # because every thing is linked you can go both ways
+        # and get the same answer
 
     counter_table = [(resource, data[resource].number_of_calls) for resource in
                      sorted(data.keys(), key=lambda x: data[x].number_of_calls, reverse=True)]
@@ -184,8 +225,6 @@ def resource_counter_cli(firstname, lastname, id, verbose=True):
         print(tabulate(counter_table, headers=['Resource Type', 'Count']))
 
     return counter_table
-
-    return id
 
 def command_line_arg_run(sys_args):
 
@@ -215,7 +254,9 @@ def command_line_arg_run(sys_args):
         resource_counter_cli(firstname=arg_dict['firstname'],
                              lastname=arg_dict['lastname'], id=None)
     else:
-        resource_counter_cli(firstname=None, lastname=none, id=arg_dict['id'])
+        resource_counter_cli(firstname=None, lastname=None, id=arg_dict['id'])
 
 if __name__ == "__main__":
     command_line_arg_run(sys.argv)
+
+    # resource_counter_cli(firstname="Cleo27", lastname="Bode78", id=None)
