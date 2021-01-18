@@ -1,8 +1,33 @@
 import pandas as pd
 import os
-import functools
 from tabulate import tabulate
+from json import loads
 import sys
+
+class InstanceRegister:
+    def __call__(self, init):
+        def register(instance, *args, **kwargs):
+            init(instance, *args, **kwargs)
+            try :
+                instance.__class__.__instances__
+            except:
+                instance.__class__.__instances__ = []
+            instance.__class__.__instances__.append(instance)
+        return register
+
+class Resource(object):
+    __instances__ = []
+    @InstanceRegister()
+    def __init__(self, id=None, resource_type=None):
+        self.id = id
+        self.resource_type = resource_type
+
+class PatientResource(object):
+    __instances__ = []
+    @InstanceRegister()
+    def __init__(self, firstname=None, lastname=None):
+        self.firstname = firstname
+        self.lastname = lastname
 
 class RescourceDataObj(object):
     """
@@ -16,129 +41,89 @@ class RescourceDataObj(object):
         # is associated with a patient
         self.counter_ids = list()
         self._extension = '.ndjson'
+        self._json_search_keyname = 'reference'
         self._resource_type_divider = '/'
 
         # initialize by loading ndjson file
         self.resource_name = self.extract_resource_name()
-        self.df = self.load_data()
-
-        self._reference_map = None
-        self._resource_dict_map = dict()
+        self.df = None
 
     @property
     def number_of_calls(self):
         return len(self.counter_ids)
 
-    @property
-    def reference_map(self):
-        # this function takes a while so definitely saving this map
-        # once it is made
-        if self._reference_map is None:
-            self._reference_map = self.make_reference_map()
-        return self._reference_map
+    def as_resource(self, jdict):
+        if self._json_search_keyname not in jdict:
+            return jdict
+        if self._resource_type_divider not in jdict[self._json_search_keyname]:
+            return jdict
 
-    def make_reference_map(self):
-        # create a dict mapping the highlevel dataframe column with
-        # any other resource type
-        ref_map = {}
-        for col in self.df:
-            # I am not sure this is the most efficient way to do this
-            # and this definitely takes a lot of time but it also
-            # greatly simplifies my algorithm if I have this ready
-            col_df = self.df[col].map(self.search_is_reference).explode()
-            if any(col_df.values):
-                unique_vals = col_df.unique()
-                ref_map[col] = unique_vals[unique_vals != False]
-        return ref_map
-
-    def resource_dict(self, resource):
-        # this dict contains a sub dataframes of the ids of other resource
-        # types that are contained in this dataframe
-        if resource not in self._resource_dict_map.keys():
-            self._resource_dict_map[resource] = self.build_resource_dict(resource)
-        return self._resource_dict_map[resource]
-
-    def build_resource_dict(self, resource):
-        # figure out column name that goes in the dataframe
-        colname = [c for c, rsrcs in self.reference_map.items() if resource in rsrcs]
-        if len(colname) == 0:
-            return None
-
-        # assuming here that if a resource type appears twice in the same entry that it is
-        # has the same id.  This seems to be correct...
-        colname = colname[0]
-
-        # this function simply extracts the ids of the resource and indexes it
-        # with the ids of the top level resource
-        dfr = pd.concat([self.df['id'], self.df[colname].map(functools.partial(
-            self.explode_search, criteria_func=functools.partial(
-                self.search_resource_criteria, resource_name=resource))).explode()], axis=1).rename(
-            columns={'id': 'id', colname: resource})
-
-        return dfr
+        full_ref = jdict[self._json_search_keyname].split(self._resource_type_divider)
+        resource_type = full_ref[0]
+        id = full_ref[1]
+        return Resource(id=id, resource_type=resource_type)
 
     def load_data(self):
         f = open(self.directory + os.sep + self.filename, 'r')
-        df = pd.read_json(f, lines=True)
+        lines = f.readlines()
         f.close()
-        return df
+
+        if self.resource_name == 'Patient':
+            print('haha')
+
+        resource_list = []
+        for l in lines:
+            ddict = loads(l, object_hook=self.as_resource)
+
+            resources = Resource.__instances__
+            for r in resources:
+                resource_list.append([ddict['id'], r.resource_type, r.id])
+
+            Resource.__instances__ = list()
+
+        if resource_list:
+            columns = ['id', self._json_search_keyname,
+                       self._json_search_keyname + '_id']
+            self.df = pd.DataFrame(resource_list, columns=columns)
 
     def extract_resource_name(self):
         return self.filename.replace(self._extension, '')
 
-    # this seems to be the fastest way to get to the resource ids or whatever else I
-    # need
-    def explode_search(self, cell, criteria_func=None, cell_list=None):
-        if cell_list is None:
-            cell_list = []
-        if isinstance(cell, list):
-            for c in cell:
-                self.explode_search(c, criteria_func=criteria_func, cell_list=cell_list)
-        elif isinstance(cell, dict):
-            for key, c in cell.items():
-                if isinstance(c, dict) or isinstance(c, list):
-                    self.explode_search(c, criteria_func=criteria_func, cell_list=cell_list)
-                else:
-                    criteria_func(c, cell_list)
-        else:
-            criteria_func(cell, cell_list)
-        return cell_list
-
-    def search_list_criteria(self, cell, cell_list, list_criteria=None):
-        # this function is used for extracting patient information
-        if cell in list_criteria:
-            cell_list.append(cell)
-
-    def search_resource_criteria(self, cell, cell_list, resource_name=None):
-        # this is used for creating the resource dict with sub dataframes
-        # and will extract the id
-        if isinstance(cell, str) and resource_name + self._resource_type_divider in cell:
-            cell_list.append(cell.replace(resource_name + self._resource_type_divider, ''))
-
-    def search_is_reference(self, cell, refs=None):
-        # using this to create the refrence map
-        # should be able combine with the explode_search function
-        # but couldn't think of a way in time
-        if refs is None:
-            refs = [False]
-        if isinstance(cell, list):
-            for c in cell:
-                self.search_is_reference(c, refs=refs)
-        elif isinstance(cell, dict):
-            for key, item in cell.items():
-                if key == 'reference' and '/' in item:
-                    refs.append(item.split('/')[0])
-                elif isinstance(item, list) or isinstance(item, dict):
-                    self.search_is_reference(item, refs=refs)
-        return refs
-
 class PatientResourceDataObj(RescourceDataObj):
-    # I want to have a specialized patient object that is probably unnecessary
+    # I want to have a specialized patient object that is a little clunky for intializing patient
     # but since I'm only using these functions with Patient made sense to split
     def __init__(self, *args, **kwargs):
         super(PatientResourceDataObj, self).__init__(*args, **kwargs)
 
+        self._json_search_keynames = ['family', 'given']
         self._name_col = 'name'
+
+    def load_data(self):
+        f = open(self.directory + os.sep + self.filename, 'r')
+        lines = f.readlines()
+        f.close()
+
+        patient_list = []
+        for l in lines:
+            ddict = loads(l, object_hook=self.as_patient)
+
+            pat_insts = PatientResource.__instances__
+            for r in pat_insts:
+                patient_list.append([ddict['id'], r.firstname, r.lastname])
+
+            PatientResource.__instances__ = list()
+
+        if patient_list:
+            columns = ['id', 'firstname', 'lastname']
+            self.df = pd.DataFrame(patient_list, columns=columns)
+
+    def as_patient(self, jdict):
+        if all([kn in jdict.keys() for kn in self._json_search_keynames]):
+            lastname = jdict['family']
+            firstname = jdict['given'][0]
+            return PatientResource(firstname=firstname, lastname=lastname)
+        else:
+            return jdict
 
     def set_patient_id(self, firstname, lastname, id):
         if id is None:
@@ -146,13 +131,10 @@ class PatientResourceDataObj(RescourceDataObj):
         self.input_id = id
 
     def find_patient_id(self, firstname, lastname):
-        id = None
-        for id, cell in zip(self.df.id, self.df[self._name_col]):
-            name = ''.join(self.explode_search(cell, criteria_func=functools.partial(
-                self.search_list_criteria, list_criteria=[firstname, lastname])))
-            if name != '':
-                break
-        return id
+        patid = self.df[(self.df['firstname'] == firstname) & (
+                self.df['lastname'] == lastname)].id.values
+        assert len(patid) == 1, "You have two patients with the same name!!"
+        return patid[0]
 
 def load_all_data(data_directory='data'):
     full_data = dict()
@@ -164,6 +146,7 @@ def load_all_data(data_directory='data'):
         else:
             rdo = RescourceDataObj(filename)
 
+        rdo.load_data()
         full_data[rdo.resource_name] = rdo
 
     return full_data
@@ -186,33 +169,29 @@ def resource_counter_cli(firstname, lastname, id, verbose=True):
         # and I know there's only one
         if resource == patient_key:
             rdo.counter_ids.append([rdo.input_id])
+            continue
 
-        has_patients = False
+        if rdo.df is None:
+            continue
+
+        keyname = rdo._json_search_keyname
         # get all the patient info for this resource type if there is any
-        df_pats = rdo.resource_dict(patient_key)
+        df_pats = rdo.df[rdo.df[keyname] == data[patient_key].resource_name]
         if df_pats is not None:
             # get the ids for this resource type if it matches the patient id
             # and if this id hasn't already been accounted for
-            df_pat = df_pats[(df_pats[patient_key] == id) & (~df_pats.id.isin(rdo.counter_ids))]
+            df_pat = df_pats[(df_pats[keyname + '_id'] == id) & (~df_pats.id.isin(rdo.counter_ids))]
             rdo.counter_ids.extend(list(df_pat.id.unique()))
-            has_patients = True
 
-        # now look at every resource that is referenced in this resource type
-        for ref_key, ref_resources in rdo.reference_map.items():
+            ref_resources = rdo.df[keyname].unique()
             for ref_rs in ref_resources:
-                # again I already know what will happen if this is a patient
                 if patient_key == ref_rs:
                     continue
-                if has_patients:
-                    df_ref = rdo.resource_dict(ref_rs)
-                    # get the ids for the reference resource type if they are linked to a patient
-                    # and if these ids haven't been accounted for
-                    # and if they are not null... happens sometimes when there are multiple
-                    # instances of resource type for a single entry of this resource type
-                    ref_ids = df_ref[(df_ref.id.isin(df_pat.id)) & (
-                        ~df_ref[ref_rs].isin(data[ref_rs].counter_ids)) & (
-                        ~df_ref[ref_rs].isnull())][ref_rs].unique()
-                    data[ref_rs].counter_ids.extend(list(ref_ids))
+                df_ref = rdo.df[rdo.df[keyname] == ref_rs]
+                ref_ids_df = df_ref[(df_ref.id.isin(df_pat.id)) & (
+                    ~df_ref[keyname + '_id'].isin(data[ref_rs].counter_ids))]
+                ref_ids = ref_ids_df[keyname + '_id'].unique()
+                data[ref_rs].counter_ids.extend(list(ref_ids))
 
         # I thought this might have to be recursive but
         # because every thing is linked you can go both ways
@@ -256,7 +235,15 @@ def command_line_arg_run(sys_args):
     else:
         resource_counter_cli(firstname=None, lastname=None, id=arg_dict['id'])
 
-if __name__ == "__main__":
-    command_line_arg_run(sys.argv)
 
-    # resource_counter_cli(firstname="Cleo27", lastname="Bode78", id=None)
+
+if __name__ == "__main__":
+    # command_line_arg_run(sys.argv)
+
+    resource_counter_cli(firstname="Cleo27", lastname="Bode78", id=None)
+
+    # f = open('data/DocumentReference.ndjson')
+    # lines = f.readlines()
+    # ddict = loads(lines[0], object_hook=as_resource)
+    # print(Resource.__instances__)
+    # print('haha')
