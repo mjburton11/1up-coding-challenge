@@ -5,6 +5,16 @@ from json import loads
 import sys
 
 class InstanceRegister:
+    """
+    This method is used as a way collect resources as they
+    are discovered when reading the json data
+
+    By forcing dicts that meet a certain criteria when reading
+    the json to be a Resource or PatientResource object I can
+    append the their newly created objects by using this method
+    so that I don't have to parse decoded json looking for
+    these resources
+    """
     def __call__(self, init):
         def register(instance, *args, **kwargs):
             init(instance, *args, **kwargs)
@@ -41,6 +51,9 @@ class RescourceDataObj(object):
         # is associated with a patient
         self.counter_ids = list()
         self._extension = '.ndjson'
+
+        # when decoding the json, look for these keys
+        # to determine if it is a resource or not
         self._json_search_keyname = 'reference'
         self._resource_type_divider = '/'
 
@@ -68,15 +81,14 @@ class RescourceDataObj(object):
         lines = f.readlines()
         f.close()
 
-        if self.resource_name == 'Patient':
-            print('haha')
-
         resource_list = []
         for l in lines:
             ddict = loads(l, object_hook=self.as_resource)
 
             resources = Resource.__instances__
             for r in resources:
+                # I think this probably takes a long time but I can't
+                # think of a cleaner way of doing this...
                 resource_list.append([ddict['id'], r.resource_type, r.id])
 
             Resource.__instances__ = list()
@@ -152,10 +164,12 @@ def load_all_data(data_directory='data'):
     return full_data
 
 def resource_counter_cli(firstname, lastname, id, verbose=True):
+
+    check_bad_inputs(firstname, lastname, id)
+
     data = load_all_data()
 
     patient_key = 'Patient'
-
     if id is None:
         data[patient_key].set_patient_id(firstname, lastname, None)
         id = data[patient_key].input_id
@@ -206,6 +220,9 @@ def resource_counter_cli(firstname, lastname, id, verbose=True):
     return counter_table
 
 def command_line_arg_run(sys_args):
+    # this is odd length because first argment is the filename
+    if len(sys_args) % 2 != 1:
+        raise ValueError('You must specify an argument with each keyword!')
 
     arg_dict = {'firstname': None,
                 'lastname': None,
@@ -216,34 +233,27 @@ def command_line_arg_run(sys_args):
         if inp in arg_dict.keys():
             arg_dict[inp] = sys_args[i+1]
 
-    if all([v is not None for v in arg_dict.values()]):
-        raise ValueError('Must specify either names or id')
-    elif all([v is None for v in arg_dict.values()]):
-        raise ValueError('Must specify either names or id')
-    elif arg_dict['firstname'] is not None and arg_dict['lastname'] is None:
-        raise ValueError('Must specify first and last name')
-    elif arg_dict['firstname'] is None and arg_dict['lastname'] is not None:
-        raise ValueError('Must specify first and last name')
-    elif arg_dict['firstname'] is not None and arg_dict['id'] is not None:
-        raise ValueError('Must specify either names or id')
-    elif arg_dict['lastname'] is not None and arg_dict['id'] is not None:
-        raise ValueError('Must specify either names or id')
+    resource_counter_cli(firstname=arg_dict['firstname'], lastname=arg_dict['lastname'],
+                         id=arg_dict['id'])
 
-    if arg_dict['firstname'] is not None:
-        resource_counter_cli(firstname=arg_dict['firstname'],
-                             lastname=arg_dict['lastname'], id=None)
-    else:
-        resource_counter_cli(firstname=None, lastname=None, id=arg_dict['id'])
+def check_bad_inputs(firstname, lastname, id):
 
+    if all([v is not None for v in [firstname, lastname, id]]):
+        raise ValueError('Must specify either names or id')
+    elif all([v is None for v in [firstname, lastname, id]]):
+        raise ValueError('Must specify either names or id')
+    elif firstname is not None and lastname is None:
+        raise ValueError('Must specify first and last name')
+    elif firstname is None and lastname is not None:
+        raise ValueError('Must specify first and last name')
+    elif firstname is not None and id is not None:
+        raise ValueError('Must specify either names or id')
+    elif lastname is not None and id is not None:
+        raise ValueError('Must specify either names or id')
 
 
 if __name__ == "__main__":
-    # command_line_arg_run(sys.argv)
+    command_line_arg_run(sys.argv)
 
-    resource_counter_cli(firstname="Cleo27", lastname="Bode78", id=None)
+    # resource_counter_cli(firstname="Cleo27", lastname="Bode78", id=None)
 
-    # f = open('data/DocumentReference.ndjson')
-    # lines = f.readlines()
-    # ddict = loads(lines[0], object_hook=as_resource)
-    # print(Resource.__instances__)
-    # print('haha')
