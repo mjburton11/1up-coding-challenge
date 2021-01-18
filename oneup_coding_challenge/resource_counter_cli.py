@@ -43,27 +43,24 @@ class RescourceDataObj(object):
     """
     Object to organize data structure manipulation and storage
     """
-    def __init__(self, filename, directory='data'):
-        self.filename = filename
+    def __init__(self, patient_id, directory='data', ignore_file='Patient.ndjson'):
+        self.patient_id = patient_id
         self.directory = directory
 
         # counter id will store how many unique times this object
         # is associated with a patient
-        self.counter_ids = list()
+        self.counter_ids = {'Patient': [patient_id]}
         self._extension = '.ndjson'
+        self.ignore_file = ignore_file
 
         # when decoding the json, look for these keys
         # to determine if it is a resource or not
         self._json_search_keyname = 'reference'
         self._resource_type_divider = '/'
 
-        # initialize by loading ndjson file
-        self.resource_name = self.extract_resource_name()
-        self.df = None
-
-    @property
-    def number_of_calls(self):
-        return len(self.counter_ids)
+    def count_resources(self):
+        return [(resource, len(self.counter_ids[resource])) for resource in
+                 sorted(self.counter_ids.keys(), key=lambda x: len(self.counter_ids[x]), reverse=True)]
 
     def as_resource(self, jdict):
         if self._json_search_keyname not in jdict:
@@ -77,57 +74,109 @@ class RescourceDataObj(object):
         return Resource(id=id, resource_type=resource_type)
 
     def load_data(self):
-        f = open(self.directory + os.sep + self.filename, 'r')
-        lines = f.readlines()
-        f.close()
+        files = os.listdir(self.directory)
+        for filename in files:
+            # ignore patient because I know there's only one
+            if self.ignore_file in filename:
+                continue
 
-        resource_list = []
-        for l in lines:
-            ddict = loads(l, object_hook=self.as_resource)
+            f = open(self.directory + os.sep + filename, 'r')
+            lines = f.readlines()
+            f.close()
 
-            resources = Resource.__instances__
-            for r in resources:
-                # I think this probably takes a long time but I can't
-                # think of a cleaner way of doing this...
-                resource_list.append([ddict['id'], r.resource_type, r.id])
+            resource_name = self.extract_resource_name(filename)
+            if resource_name not in self.counter_ids:
+                self.counter_ids[resource_name] = []
 
-            Resource.__instances__ = list()
+            # for each line in the ndjson I will look for any
+            # resources that are created using object_hook
+            # then I will append only the ids of the resources
+            # that have not already been accounted for
+            for l in lines:
+                ddict = loads(l, object_hook=self.as_resource)
 
-        if resource_list:
-            columns = ['id', self._json_search_keyname,
-                       self._json_search_keyname + '_id']
-            self.df = pd.DataFrame(resource_list, columns=columns)
+                resources = Resource.__instances__
+                if self.patient_id in [r.id for r in resources]:
+                    # first append the top level id
+                    if ddict['id'] not in self.counter_ids[resource_name]:
+                        self.counter_ids[resource_name].append(ddict['id'])
+                    # then look for any other resources that were created
+                    # with this associated patient and append them to the
+                    # counter lists
+                    for r in resources:
+                        if r.resource_type != 'Patient':
+                            if r.resource_type not in self.counter_ids:
+                                self.counter_ids[r.resource_type] = [r.id]
+                            elif r.id not in self.counter_ids[r.resource_type]:
+                                self.counter_ids[r.resource_type].append(r.id)
 
-    def extract_resource_name(self):
-        return self.filename.replace(self._extension, '')
+                # reset for next line
+                Resource.__instances__ = list()
 
-class PatientResourceDataObj(RescourceDataObj):
+    def extract_resource_name(self, filename):
+        return filename.replace(self._extension, '')
+
+class PatientResourceDataObj(object):
     # I want to have a specialized patient object that is a little clunky for intializing patient
     # but since I'm only using these functions with Patient made sense to split
-    def __init__(self, *args, **kwargs):
-        super(PatientResourceDataObj, self).__init__(*args, **kwargs)
+    def __init__(self, firstname, lastname, id, directory='data'):
 
+        self.firstname = firstname
+        self.lastname = lastname
+        self.id = id
+        self.check_bad_inputs()
+
+        self.directory = directory
+        self.find_by_id = self.id_or_name()
+
+        self._filename = 'Patient.ndjson'
         self._json_search_keynames = ['family', 'given']
         self._name_col = 'name'
 
+    def check_bad_inputs(self):
+
+        if all([v is not None for v in [self.firstname, self.lastname, self.id]]):
+            raise ValueError('Must specify either names or self.id')
+        elif all([v is None for v in [self.firstname, self.lastname, self.id]]):
+            raise ValueError('Must specify either names or self.id')
+        elif self.firstname is not None and self.lastname is None:
+            raise ValueError('Must specify first and last name')
+        elif self.firstname is None and self.lastname is not None:
+            raise ValueError('Must specify first and last name')
+        elif self.firstname is not None and self.id is not None:
+            raise ValueError('Must specify either names or self.id')
+        elif self.lastname is not None and self.id is not None:
+            raise ValueError('Must specify either names or id')
+
+    def id_or_name(self):
+        if self.firstname is not None and self.lastname is not None:
+            self.find_by_id = False
+        else:
+            self.find_by_id = True
+
     def load_data(self):
-        f = open(self.directory + os.sep + self.filename, 'r')
+        f = open(self.directory + os.sep + self._filename, 'r')
         lines = f.readlines()
         f.close()
 
-        patient_list = []
         for l in lines:
             ddict = loads(l, object_hook=self.as_patient)
 
+            # this assumes that their is only one patient with this
+            # name combination and associated id
             pat_insts = PatientResource.__instances__
             for r in pat_insts:
-                patient_list.append([ddict['id'], r.firstname, r.lastname])
+                if r.firstname == self.firstname and r.lastname == self.lastname:
+                    self.id = ddict['id']
+                    break
+
+            if self.id is not None:
+                break
 
             PatientResource.__instances__ = list()
 
-        if patient_list:
-            columns = ['id', 'firstname', 'lastname']
-            self.df = pd.DataFrame(patient_list, columns=columns)
+        if self.id is None:
+            raise ValueError('didnt find name of patient')
 
     def as_patient(self, jdict):
         if all([kn in jdict.keys() for kn in self._json_search_keynames]):
@@ -137,82 +186,18 @@ class PatientResourceDataObj(RescourceDataObj):
         else:
             return jdict
 
-    def set_patient_id(self, firstname, lastname, id):
-        if id is None:
-            id = self.find_patient_id(firstname, lastname)
-        self.input_id = id
-
-    def find_patient_id(self, firstname, lastname):
-        patid = self.df[(self.df['firstname'] == firstname) & (
-                self.df['lastname'] == lastname)].id.values
-        assert len(patid) == 1, "You have two patients with the same name!!"
-        return patid[0]
-
-def load_all_data(data_directory='data'):
-    full_data = dict()
-
-    files = os.listdir(data_directory)
-    for filename in files:
-        if 'Patient' in filename:
-            rdo = PatientResourceDataObj(filename)
-        else:
-            rdo = RescourceDataObj(filename)
-
-        rdo.load_data()
-        full_data[rdo.resource_name] = rdo
-
-    return full_data
-
 def resource_counter_cli(firstname, lastname, id, verbose=True):
 
-    check_bad_inputs(firstname, lastname, id)
+    # get the patient id first
+    pat = PatientResourceDataObj(firstname, lastname, id)
+    if not pat.find_by_id:
+        pat.load_data()
+        id = pat.id
 
-    data = load_all_data()
-
-    patient_key = 'Patient'
-    if id is None:
-        data[patient_key].set_patient_id(firstname, lastname, None)
-        id = data[patient_key].input_id
-
-    resource_types = data.keys()
-
-    for resource in resource_types:
-        rdo = data[resource]
-
-        # not going to bother looking for the key cause I already did
-        # and I know there's only one
-        if resource == patient_key:
-            rdo.counter_ids.append([rdo.input_id])
-            continue
-
-        if rdo.df is None:
-            continue
-
-        keyname = rdo._json_search_keyname
-        # get all the patient info for this resource type if there is any
-        df_pats = rdo.df[rdo.df[keyname] == data[patient_key].resource_name]
-        if df_pats is not None:
-            # get the ids for this resource type if it matches the patient id
-            # and if this id hasn't already been accounted for
-            df_pat = df_pats[(df_pats[keyname + '_id'] == id) & (~df_pats.id.isin(rdo.counter_ids))]
-            rdo.counter_ids.extend(list(df_pat.id.unique()))
-
-            ref_resources = rdo.df[keyname].unique()
-            for ref_rs in ref_resources:
-                if patient_key == ref_rs:
-                    continue
-                df_ref = rdo.df[rdo.df[keyname] == ref_rs]
-                ref_ids_df = df_ref[(df_ref.id.isin(df_pat.id)) & (
-                    ~df_ref[keyname + '_id'].isin(data[ref_rs].counter_ids))]
-                ref_ids = ref_ids_df[keyname + '_id'].unique()
-                data[ref_rs].counter_ids.extend(list(ref_ids))
-
-        # I thought this might have to be recursive but
-        # because every thing is linked you can go both ways
-        # and get the same answer
-
-    counter_table = [(resource, data[resource].number_of_calls) for resource in
-                     sorted(data.keys(), key=lambda x: data[x].number_of_calls, reverse=True)]
+    # load the data and build up the counter as you parse the json
+    rdo = RescourceDataObj(id)
+    rdo.load_data()
+    counter_table = rdo.count_resources()
 
     if verbose:
         print(tabulate(counter_table, headers=['Resource Type', 'Count']))
@@ -235,22 +220,6 @@ def command_line_arg_run(sys_args):
 
     resource_counter_cli(firstname=arg_dict['firstname'], lastname=arg_dict['lastname'],
                          id=arg_dict['id'])
-
-def check_bad_inputs(firstname, lastname, id):
-
-    if all([v is not None for v in [firstname, lastname, id]]):
-        raise ValueError('Must specify either names or id')
-    elif all([v is None for v in [firstname, lastname, id]]):
-        raise ValueError('Must specify either names or id')
-    elif firstname is not None and lastname is None:
-        raise ValueError('Must specify first and last name')
-    elif firstname is None and lastname is not None:
-        raise ValueError('Must specify first and last name')
-    elif firstname is not None and id is not None:
-        raise ValueError('Must specify either names or id')
-    elif lastname is not None and id is not None:
-        raise ValueError('Must specify either names or id')
-
 
 if __name__ == "__main__":
     command_line_arg_run(sys.argv)
